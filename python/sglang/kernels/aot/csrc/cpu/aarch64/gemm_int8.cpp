@@ -14,7 +14,8 @@ void int8_scaled_mm_impl(
     const float* __restrict__ bias,     // [1, N]
     int64_t M,
     int64_t N,
-    int64_t K) {
+    int64_t K,
+    bool packed_b) {
   TORCH_CHECK(false, "not supported yet");
 }
 
@@ -28,11 +29,12 @@ void int8_scaled_mm_impl<at::BFloat16>(
     const float* __restrict__ bias,
     int64_t M,
     int64_t N,
-    int64_t K) {
+    int64_t K,
+    bool packed_b) {
   const int slice_size = (M * K * sizeof(int8_t)) > kL2Size ? 64 : 8;
   const int num_slices = (N + slice_size - 1) / slice_size;
 
-  auto mm = [mat1, mat2, out, M, N, K, scales1, scales2, bias, slice_size](int64_t begin, int64_t end) {
+  auto mm = [mat1, mat2, out, M, N, K, scales1, scales2, bias, slice_size, packed_b](int64_t begin, int64_t end) {
     for (int64_t slice_idx = begin; slice_idx < end; ++slice_idx) {
       const int64_t n_start = slice_idx * slice_size;
       const int64_t n_end = std::min(n_start + slice_size, N);
@@ -42,7 +44,11 @@ void int8_scaled_mm_impl<at::BFloat16>(
       const int8_t* b_ptr = mat2 + n_start * K;
       bfloat16_t* c_ptr = reinterpret_cast<bfloat16_t*>(out) + n_start;
 
-      op::i8mm_matmul(a_ptr, b_ptr, c_ptr, M, K, N, slice_width, scales1, scales2 + n_start);
+      if (packed_b) {
+        op::i8mm_matmul_packed_b(a_ptr, b_ptr, c_ptr, M, K, N, slice_width, scales1, scales2 + n_start);
+      } else {
+        op::i8mm_matmul(a_ptr, b_ptr, c_ptr, M, K, N, slice_width, scales1, scales2 + n_start);
+      }
 
       // NOTE: matmul reduces matrix values to BF16, may influence precision
       if (bias) {
@@ -90,7 +96,7 @@ at::Tensor int8_scaled_mm_with_quant(
     at::Tensor& scales2,
     const std::optional<at::Tensor>& bias,
     at::ScalarType out_dtype,
-    bool /*is_vnni*/) {
+    bool is_vnni) {
   CHECK_LAST_DIM_CONTIGUOUS_INPUT(mat1);
   CHECK_INPUT(mat2);
   CHECK_INPUT(scales2);
@@ -110,7 +116,14 @@ at::Tensor int8_scaled_mm_with_quant(
   TORCH_CHECK(st == out_dtype, "int8_scaled_mm_with_quant: expect A has same dtype with out_dtype.");
   TORCH_CHECK(mat2.scalar_type() == at::kChar, "int8_scaled_mm_with_quant: expect mat2 to be int8.");
   TORCH_CHECK(scales2.scalar_type() == at::kFloat, "int8_scaled_mm_with_quant: expect scales to be float32.");
-
+  if (is_vnni) {
+    TORCH_CHECK(
+        K % 16 == 0 && N % 8 == 0,
+        "int8_scaled_mm_with_quant: packed weight requires K % 16 == 0 and N % 8 == 0, got K=",
+        K,
+        ", N=",
+        N);
+  }
   const int64_t buffer_size = M * K + M * sizeof(float);
   auto buffer = at::empty({buffer_size}, mat1.options().dtype(at::kChar));
   auto out = at::empty({M, N}, mat1.options().dtype(out_dtype));
@@ -143,7 +156,8 @@ at::Tensor int8_scaled_mm_with_quant(
         bias_data,
         M,
         N,
-        K);
+        K,
+        is_vnni);
   });
   return out;
 }

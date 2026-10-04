@@ -30,7 +30,8 @@ void fused_experts_int8_kernel_impl(
     int64_t N,
     int64_t K,
     int64_t E,
-    int64_t topk) {
+    int64_t topk,
+    bool packed_b) {
   TORCH_CHECK(false, "not implemented yet");
 }
 
@@ -48,7 +49,8 @@ void fused_experts_int8_kernel_impl<at::BFloat16>(
     int64_t N,
     int64_t K,
     int64_t E,
-    int64_t topk) {
+    int64_t topk,
+    bool packed_b) {
   // x dispatch buffer to aggregate all rows per expert
   int64_t max_agg_rows = 0;
   for (const auto& [eid, rows] : x_per_expert) {
@@ -124,9 +126,13 @@ void fused_experts_int8_kernel_impl<at::BFloat16>(
           float* gate_ptr = gate + n_start;
           float* up_ptr = up + n_start;
 
-          op::i8mm_matmul(x_agg, w1e_ptr, gate_ptr, n_agg, K, N, slice_width, x_scale_agg, w1e_scale_ptr);
-          op::i8mm_matmul(x_agg, w3e_ptr, up_ptr, n_agg, K, N, slice_width, x_scale_agg, w3e_scale_ptr);
-
+          if (packed_b) {
+            op::i8mm_matmul_packed_b(x_agg, w1e_ptr, gate_ptr, n_agg, K, N, slice_width, x_scale_agg, w1e_scale_ptr);
+            op::i8mm_matmul_packed_b(x_agg, w3e_ptr, up_ptr, n_agg, K, N, slice_width, x_scale_agg, w3e_scale_ptr);
+          } else {
+            op::i8mm_matmul(x_agg, w1e_ptr, gate_ptr, n_agg, K, N, slice_width, x_scale_agg, w1e_scale_ptr);
+            op::i8mm_matmul(x_agg, w3e_ptr, up_ptr, n_agg, K, N, slice_width, x_scale_agg, w3e_scale_ptr);
+          }
           for (int i = 0; i < n_agg; ++i) {
             const float* __restrict__ gate_ptr = gate + n_start + i * N;
             float* __restrict__ up_ptr = up + n_start + i * N;
@@ -179,7 +185,11 @@ void fused_experts_int8_kernel_impl<at::BFloat16>(
             const float* w2e_scale_ptr = w2e_scale + n_start;
             float* down_ptr = down + n_start;
 
-            op::i8mm_matmul(up_q8, w2e_ptr, down_ptr, n_agg, N, K, slice_width, up_scale, w2e_scale_ptr);
+            if (packed_b) {
+              op::i8mm_matmul_packed_b(up_q8, w2e_ptr, down_ptr, n_agg, N, K, slice_width, up_scale, w2e_scale_ptr);
+            } else {
+              op::i8mm_matmul(up_q8, w2e_ptr, down_ptr, n_agg, N, K, slice_width, up_scale, w2e_scale_ptr);
+            }
           }
 
           // accumulate to out buffer
@@ -242,7 +252,7 @@ at::Tensor fused_experts_cpu(
     const std::optional<at::Tensor>& /*w2_bias*/,
     const std::optional<double>& /*alpha*/,
     const std::optional<double>& /*limit*/,
-    bool /*is_vnni*/,
+    bool is_vnni,
     const std::optional<std::string>& activation) {
   const auto st = hidden_states.scalar_type();
   CHECK_INPUT(hidden_states);
@@ -275,6 +285,14 @@ at::Tensor fused_experts_cpu(
   CHECK_EQ(w2.size(1), K);
   CHECK_EQ(w13.size(2), K);
   CHECK_EQ(w2.size(2), N);
+  if (is_vnni) {
+    TORCH_CHECK(
+        N % 16 == 0 && K % 16 == 0,
+        "fused_experts_cpu: packed weight requires N % 16 == 0 and K % 16 == 0, got N=",
+        N,
+        ", K=",
+        K);
+  }
 
   CHECK_EQ(inplace, false);
   at::Tensor out = at::empty_like(hidden_states);
@@ -325,7 +343,8 @@ at::Tensor fused_experts_cpu(
         N,
         K,
         E,
-        topk);
+        topk,
+        is_vnni);
   });
 
   return out;

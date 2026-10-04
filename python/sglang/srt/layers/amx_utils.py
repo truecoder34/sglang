@@ -3,8 +3,8 @@ import logging
 import torch
 import transformers
 
-from sglang.srt.utils import cpu_has_amx_support
 from sglang.srt.environ import envs
+from sglang.srt.utils import cpu_has_amx_support
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +214,7 @@ def _amx_process_weight_after_loading(
                 module.bias.data.float(), requires_grad=False
             )
 
+
 def _has_sgl_kernel_op(name: str) -> bool:
     try:
         import sgl_kernel  # noqa: F401
@@ -244,6 +245,7 @@ def _arm64_int8_process_weight_after_loading(module, weight_names) -> None:
         new_w.__dict__ = w.__dict__  # keep weight_loader & friends, like the AMX path
         setattr(module, name, new_w)
     module.use_arm64_packed_int8 = can_pack
+
 
 class PackWeightMethod:
     def __init__(self, weight_names, transpose_dims=None):

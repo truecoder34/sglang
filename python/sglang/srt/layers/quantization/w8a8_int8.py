@@ -215,7 +215,8 @@ class W8A8Int8LinearMethod(LinearMethodBase):
                 layer.weight_scale,
                 bias,
                 x.dtype,
-                use_intel_amx_backend(layer) or getattr(layer, "use_arm64_packed_int8", False),
+                use_intel_amx_backend(layer)
+                or getattr(layer, "use_arm64_packed_int8", False),
                 # is_vnni
             )
         x_q, x_scale = per_token_quant_int8(x)
@@ -328,6 +329,7 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
         layer.w2_weight_scale = Parameter(
             layer.w2_weight_scale.data, requires_grad=False
         )
+
     def create_moe_runner(
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
     ):
@@ -381,7 +383,8 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
                 None,  # w3 bias
                 None,  # alpha
                 None,  # limit
-                use_intel_amx_backend(layer) or getattr(layer, "use_arm64_packed_int8", False),  # is_vnni
+                use_intel_amx_backend(layer)
+                or getattr(layer, "use_arm64_packed_int8", False),  # is_vnni
                 self.moe_runner_config.activation,  # activation
             )
             return StandardCombineInput(hidden_states=output)

@@ -230,7 +230,6 @@ __attribute__((target("+i8mm+bf16"))) void i8mm_matmul(
   }
 }
 
-
 // do matmul in "R rows x C cols" tile with i8mm , weights are prepacked
 template <int R, typename T>
 __attribute__((target("+i8mm+bf16"))) inline void i8mm_tile_packed_b(

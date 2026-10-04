@@ -7,9 +7,7 @@
 at::Tensor convert_weight_packed_i8mm(at::Tensor& weight) {
   CHECK_INPUT(weight);
   TORCH_CHECK(
-      weight.scalar_type() == at::kChar,
-      "convert_weight_packed_i8mm: expect int8 weight, got ",
-      weight.scalar_type());
+      weight.scalar_type() == at::kChar, "convert_weight_packed_i8mm: expect int8 weight, got ", weight.scalar_type());
   TORCH_CHECK(
       weight.dim() == 2 || weight.dim() == 3,
       "convert_weight_packed_i8mm: expect 2D or 3D weight, got ",
@@ -26,8 +24,5 @@ at::Tensor convert_weight_packed_i8mm(at::Tensor& weight) {
       IC);
 
   const int64_t rows = weight.numel() / IC;  // E * OC for 3D MoE weights
-  return weight.view({rows / 8, 4, 2, IC / 16, 2, 8})
-      .permute({0, 3, 1, 4, 2, 5})
-      .contiguous()
-      .view(weight.sizes());
+  return weight.view({rows / 8, 4, 2, IC / 16, 2, 8}).permute({0, 3, 1, 4, 2, 5}).contiguous().view(weight.sizes());
 }

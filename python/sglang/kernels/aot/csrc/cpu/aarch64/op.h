@@ -230,6 +230,140 @@ __attribute__((target("+i8mm+bf16"))) void i8mm_matmul(
   }
 }
 
+
+// do matmul in "R rows x C cols" tile with i8mm , weights are prepacked
+template <int R, typename T>
+__attribute__((target("+i8mm+bf16"))) inline void i8mm_tile_packed_b(
+    const int8_t* __restrict__ a,
+    const int8_t* __restrict__ b,
+    T* c,
+    int64_t K,
+    int64_t N,
+    int slice_width,
+    const float* __restrict__ scales1,
+    const float* __restrict__ scales2) {
+  static_assert(std::is_same_v<T, float> || std::is_same_v<T, bfloat16_t>);
+  static_assert(R == 2 || R == 4);
+
+  const int8_t* a_rows[R];
+  T* c_rows[R];
+  for (int i = 0; i < R; ++i) {
+    a_rows[i] = a + i * K;
+    c_rows[i] = c + i * N;
+  }
+
+  for (int col = 0; col < slice_width; col += 8) {
+    const int8_t* bp = b + col * K;
+    int32x4_t vsums[R / 2][4]{};
+
+    // TODO: accumulated integer sum may overflow when K >= 65536
+    for (int64_t k = 0; k < K; k += 16, bp += 128) {
+      int8x16_t va[R], vb[8];
+      for (int i = 0; i < R; i += 2) {
+        const int64x2_t va0_s64 = vreinterpretq_s64_s8(vld1q_s8(a_rows[i + 0] + k));
+        const int64x2_t va1_s64 = vreinterpretq_s64_s8(vld1q_s8(a_rows[i + 1] + k));
+        va[i + 0] = vreinterpretq_s8_s64(vzip1q_s64(va0_s64, va1_s64));
+        va[i + 1] = vreinterpretq_s8_s64(vzip2q_s64(va0_s64, va1_s64));
+      }
+      for (int j = 0; j < 8; ++j) {
+        vb[j] = vld1q_s8(bp + 16 * j);  // weights: plain loads, already zipped at pack time
+      }
+      for (int i = 0; i < R / 2; ++i) {
+        for (int j = 0; j < 4; ++j) {
+          vsums[i][j] = vmmlaq_s32(vsums[i][j], va[i * 2 + 0], vb[j * 2 + 0]);
+          vsums[i][j] = vmmlaq_s32(vsums[i][j], va[i * 2 + 1], vb[j * 2 + 1]);
+        }
+      }
+    }
+
+    for (int i = 0; i < R; i += 2) {
+      for (int j = 0; j < 8; j += 2) {
+        float32x4_t vsum_f32 = vcvtq_f32_s32(vsums[i / 2][j / 2]);
+        const float32x4_t scales = {
+            scales1[i + 0] * scales2[col + j + 0],
+            scales1[i + 0] * scales2[col + j + 1],
+            scales1[i + 1] * scales2[col + j + 0],
+            scales1[i + 1] * scales2[col + j + 1],
+        };
+        vsum_f32 = vmulq_f32(vsum_f32, scales);
+        if constexpr (std::is_same_v<T, bfloat16_t>) {
+          const bfloat16x4_t vsum_bf16 = vcvt_bf16_f32(vsum_f32);
+          c_rows[i + 0][col + j + 0] = vget_lane_bf16(vsum_bf16, 0);
+          c_rows[i + 0][col + j + 1] = vget_lane_bf16(vsum_bf16, 1);
+          c_rows[i + 1][col + j + 0] = vget_lane_bf16(vsum_bf16, 2);
+          c_rows[i + 1][col + j + 1] = vget_lane_bf16(vsum_bf16, 3);
+        } else {
+          c_rows[i + 0][col + j + 0] = vgetq_lane_f32(vsum_f32, 0);
+          c_rows[i + 0][col + j + 1] = vgetq_lane_f32(vsum_f32, 1);
+          c_rows[i + 1][col + j + 0] = vgetq_lane_f32(vsum_f32, 2);
+          c_rows[i + 1][col + j + 1] = vgetq_lane_f32(vsum_f32, 3);
+        }
+      }
+    }
+  }
+}
+
+template <typename T>
+__attribute__((target("+dotprod+bf16"))) inline void sdot_gemv_packed_b(
+    const int8_t* __restrict__ a,
+    const int8_t* __restrict__ b,
+    T* c,
+    int64_t K,
+    int slice_width,
+    float scale1,
+    const float* __restrict__ scales2) {
+  for (int col = 0; col < slice_width; col += 8) {
+    const int8_t* bp = b + col * K;
+    int32x4_t acc[4]{};  // one accumulator per channel pair (p = 0..3)
+
+    for (int64_t k = 0; k < K; k += 16, bp += 128) {
+      const int64x2_t va = vreinterpretq_s64_s8(vld1q_s8(a + k));
+      const int8x16_t lo = vreinterpretq_s8_s64(vdupq_laneq_s64(va, 0));  // a[k .. k+7], duplicated
+      const int8x16_t hi = vreinterpretq_s8_s64(vdupq_laneq_s64(va, 1));  // a[k+8 .. k+15], duplicated
+      for (int p = 0; p < 4; ++p) {
+        acc[p] = vdotq_s32(acc[p], vld1q_s8(bp + 32 * p + 0), lo);
+        acc[p] = vdotq_s32(acc[p], vld1q_s8(bp + 32 * p + 16), hi);
+      }
+    }
+
+    int32_t sums[8];
+    vst1q_s32(sums + 0, vpaddq_s32(acc[0], acc[1]));  // channels col+0 .. col+3
+    vst1q_s32(sums + 4, vpaddq_s32(acc[2], acc[3]));  // channels col+4 .. col+7
+    for (int j = 0; j < 8; ++j) {
+      const float sum_scaled = static_cast<float>(sums[j]) * scale1 * scales2[col + j];
+      if constexpr (std::is_same_v<T, bfloat16_t>) {
+        c[col + j] = vcvth_bf16_f32(sum_scaled);
+      } else {
+        c[col + j] = sum_scaled;
+      }
+    }
+  }
+}
+
+template <typename T>
+inline void i8mm_matmul_packed_b(
+    const int8_t* __restrict__ a,
+    const int8_t* __restrict__ b,
+    T* c,
+    int64_t M,
+    int64_t K,
+    int64_t N,
+    int slice_width,
+    const float* __restrict__ scales1,
+    const float* __restrict__ scales2) {
+  int64_t row = 0;
+  for (; row + 4 <= M; row += 4) {
+    i8mm_tile_packed_b<4>(a + row * K, b, c + row * N, K, N, slice_width, scales1 + row, scales2);
+  }
+  if (row + 2 <= M) {
+    i8mm_tile_packed_b<2>(a + row * K, b, c + row * N, K, N, slice_width, scales1 + row, scales2);
+    row += 2;
+  }
+  if (row < M) {
+    sdot_gemv_packed_b(a + row * K, b, c + row * N, K, slice_width, scales1[row], scales2);
+  }
+}
+
 __attribute__((target("+bf16"))) inline void
 add_bias(bfloat16_t* __restrict__ out, const float* __restrict__ bias, int64_t M, int64_t N, int width) {
   int col = 0;

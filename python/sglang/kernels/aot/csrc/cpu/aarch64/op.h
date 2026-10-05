@@ -311,6 +311,7 @@ __attribute__((target("+dotprod+bf16"))) inline void sdot_gemv_packed_b(
     int slice_width,
     float scale1,
     const float* __restrict__ scales2) {
+  static_assert(std::is_same_v<T, float> || std::is_same_v<T, bfloat16_t>);
   for (int col = 0; col < slice_width; col += 8) {
     const int8_t* bp = b + col * K;
     int32x4_t acc[4]{};  // one accumulator per channel pair (p = 0..3)

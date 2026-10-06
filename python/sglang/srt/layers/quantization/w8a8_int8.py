@@ -11,6 +11,7 @@ from sglang.kernels.ops.quantization.int8_kernel import per_token_quant_int8
 from sglang.srt.layers.amx_utils import (
     CPUQuantMethod,
     _amx_process_weight_after_loading,
+    _arm64_int8_process_weight_after_loading,
 )
 from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
 from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
@@ -163,7 +164,7 @@ class W8A8Int8LinearMethod(LinearMethodBase):
             if _is_cpu_amx_available:
                 _amx_process_weight_after_loading(layer, ["weight"])
             elif _is_cpu_arm64:
-                layer.weight = Parameter(layer.weight.data, requires_grad=False)
+                _arm64_int8_process_weight_after_loading(layer, ["weight"])
             else:
                 assert False, "W8A8Int8LinearMethod on CPU only works on AMX or Arm64"
         else:
@@ -214,7 +215,9 @@ class W8A8Int8LinearMethod(LinearMethodBase):
                 layer.weight_scale,
                 bias,
                 x.dtype,
-                True,  # is_vnni
+                use_intel_amx_backend(layer)
+                or getattr(layer, "use_arm64_packed_int8", False),
+                # is_vnni
             )
         x_q, x_scale = per_token_quant_int8(x)
 
@@ -315,6 +318,8 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if _is_cpu_amx_available:
             _amx_process_weight_after_loading(layer, ["w13_weight", "w2_weight"])
+        elif _is_cpu_arm64:
+            _arm64_int8_process_weight_after_loading(layer, ["w13_weight", "w2_weight"])
         else:
             layer.w13_weight = Parameter(layer.w13_weight, requires_grad=False)
             layer.w2_weight = Parameter(layer.w2_weight, requires_grad=False)
@@ -378,7 +383,8 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
                 None,  # w3 bias
                 None,  # alpha
                 None,  # limit
-                True,  # is_vnni
+                use_intel_amx_backend(layer)
+                or getattr(layer, "use_arm64_packed_int8", False),  # is_vnni
                 self.moe_runner_config.activation,  # activation
             )
             return StandardCombineInput(hidden_states=output)

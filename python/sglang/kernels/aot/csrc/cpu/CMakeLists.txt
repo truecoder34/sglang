@@ -128,6 +128,13 @@ if(MY_ARCH_DIR STREQUAL "x86_64")
         -mamx-int8
         -fopenmp
     )
+elseif(MY_ARCH_DIR STREQUAL "aarch64")
+    add_compile_options(
+        -O3
+        -Wno-unknown-pragmas
+        -march=armv8.6-a+i8mm+bf16+dotprod+fp16
+        -fopenmp
+    )
 else()
     add_compile_options(
         -O3

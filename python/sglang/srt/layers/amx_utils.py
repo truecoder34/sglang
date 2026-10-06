@@ -3,6 +3,7 @@ import logging
 import torch
 import transformers
 
+from sglang.srt.environ import envs
 from sglang.srt.utils import cpu_has_amx_support
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,38 @@ def _amx_process_weight_after_loading(
             module.bias = torch.nn.Parameter(
                 module.bias.data.float(), requires_grad=False
             )
+
+
+def _has_sgl_kernel_op(name: str) -> bool:
+    try:
+        import sgl_kernel  # noqa: F401
+
+        return hasattr(torch.ops.sgl_kernel, name)
+    except Exception:
+        return False
+
+
+def _arm64_int8_process_weight_after_loading(module, weight_names) -> None:
+    # Pre-pack int8 weights once for the Arm64 i8mm GEMM. All-or-nothing per module.
+    weights = [getattr(module, name) for name in weight_names]
+    can_pack = (
+        envs.SGLANG_CPU_ARM64_INT8_PREPACK.get()
+        and _has_sgl_kernel_op("convert_weight_packed_i8mm")
+        and all(
+            w.dtype == torch.int8 and w.shape[-2] % 16 == 0 and w.shape[-1] % 16 == 0
+            for w in weights
+        )
+    )
+    for name, w in zip(weight_names, weights):
+        data = (
+            torch.ops.sgl_kernel.convert_weight_packed_i8mm(w.data)
+            if can_pack
+            else w.data
+        )
+        new_w = torch.nn.Parameter(data, requires_grad=False)
+        new_w.__dict__ = w.__dict__  # keep weight_loader & friends, like the AMX path
+        setattr(module, name, new_w)
+    module.use_arm64_packed_int8 = can_pack
 
 
 class PackWeightMethod:

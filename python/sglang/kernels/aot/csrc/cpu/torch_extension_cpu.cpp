@@ -320,6 +320,9 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
 
 // weight prepack
 at::Tensor convert_weight_packed(at::Tensor& weight);
+#if defined(__aarch64__)
+at::Tensor convert_weight_packed_i8mm(at::Tensor& weight);
+#endif
 
 // scale prepack for mxfp4
 at::Tensor convert_scale_packed(at::Tensor& scale);
@@ -828,6 +831,10 @@ TORCH_LIBRARY_FRAGMENT(sgl_kernel, m) {
   // weight prepack
   m.def("convert_weight_packed(Tensor weight) -> Tensor");
   m.impl("convert_weight_packed", torch::kCPU, &convert_weight_packed);
+#if defined(__aarch64__)
+  m.def("convert_weight_packed_i8mm(Tensor weight) -> Tensor");
+  m.impl("convert_weight_packed_i8mm", torch::kCPU, &convert_weight_packed_i8mm);
+#endif
 
   // scale prepack for mxfp4
   m.def("convert_scale_packed(Tensor scale) -> Tensor");
